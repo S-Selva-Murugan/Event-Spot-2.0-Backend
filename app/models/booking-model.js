@@ -24,9 +24,14 @@ const bookingSchema = new mongoose.Schema(
     razorpaySignature: String,
     paymentStatus: {
       type: String,
-      enum: ["created", "paid", "failed"],
+      enum: ["created", "authorized", "paid", "failed", "refunded"],
       default: "created",
     },
+    paymentDate: Date,
+    failureReason: String,
+    refundAmount: Number,
+    refundDate: Date,
+    refundId: String,
   },
   { timestamps: true }
 );

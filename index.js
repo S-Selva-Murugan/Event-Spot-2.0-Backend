@@ -4,6 +4,7 @@ const configureDB = require('./config/db');
 const eventCltr = require('./app/controllers/event-ctlr');
 const userCltr = require('./app/controllers/user-cltr');
 const bookingCltr = require('./app/controllers/booking-cltr');
+const paymentCltr = require('./app/controllers/payment-ctlr');
 const multer = require('multer');
 const cognitoAuth = require('./middlewares/cognitoAuth');
 const Razorpay = require('razorpay');
@@ -14,9 +15,11 @@ const app = express();
 const PORT = 3001;
 
 configureDB();
-app.use(express.json());
 app.use(cors());
+
+// Body parser configuration
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // ✅ Initialize Razorpay (test mode)
 const razorpay = new Razorpay({
@@ -58,10 +61,18 @@ app.post('/api/users/login', userCltr.login);
 app.post('/api/bookings', cognitoAuth, bookingCltr.create);
 app.get('/api/bookings', cognitoAuth, bookingCltr.listUserBookings);
 
-// -------------------- PAYMENT (directly here) --------------------
+// -------------------- PAYMENT ROUTES --------------------
+// Create Razorpay order
 app.post('/api/payment/create-order', async (req, res) => {
   try {
     const { amount, currency = 'INR', receipt } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid amount',
+      });
+    }
 
     const options = {
       amount: amount * 100, // convert to paise
@@ -80,9 +91,22 @@ app.post('/api/payment/create-order', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Order creation failed',
+      error: error.message,
     });
   }
 });
+
+// Verify payment (before creating booking)
+app.post('/api/payment/verify', paymentCltr.verify);
+
+// Razorpay webhook handler
+// Note: For proper webhook signature verification, you should use express.raw() middleware
+// But for now, we'll use JSON body and verify with the parsed body
+// In production, configure webhook route separately with raw body parser
+app.post('/api/payment/webhook', express.json({ verify: (req, res, buf) => {
+  // Store raw body for signature verification
+  req.rawBody = buf.toString('utf8');
+}}), paymentCltr.webhook);
 
 // -------------------- CHATBOT UPLOAD --------------------
 const multerLocal = multer({
