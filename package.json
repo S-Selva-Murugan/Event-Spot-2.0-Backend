@@ -5,16 +5,22 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev:worker": "node --watch worker.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.913.0",
+    "@langchain/community": "^1.1.16",
+    "@langchain/core": "^1.1.26",
+    "@langchain/openai": "^1.2.8",
+    "@langchain/qdrant": "^1.0.1",
     "aws-jwt-verify": "^5.1.1",
+    "bullmq": "^5.69.3",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
+    "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "express-validator": "^7.2.1",
     "google-auth-library": "^10.4.2",
@@ -23,6 +29,7 @@
     "mongoose": "^8.19.1",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.10",
+    "pdf-parse": "^1.1.4",
     "razorpay": "^2.9.6",
     "uuid": "^13.0.0"
   }

@@ -8,7 +8,12 @@ const paymentCltr = require('./app/controllers/payment-ctlr');
 const multer = require('multer');
 const cognitoAuth = require('./middlewares/cognitoAuth');
 const Razorpay = require('razorpay');
-require('dotenv').config();
+const { Queue } = require('bullmq');
+const { OpenAIEmbeddings } = require('@langchain/openai');
+const { QdrantVectorStore } = require('@langchain/qdrant');
+const OpenAI = require('openai');
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const bodyParser = require('body-parser');
 
 const app = express();
@@ -20,6 +25,17 @@ app.use(cors());
 // Body parser configuration
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const queue = new Queue('file-upload-queue', {
+  connection: {
+    host: 'localhost',
+    port: '6379',
+  },
+});
 
 // ✅ Initialize Razorpay (test mode)
 const razorpay = new Razorpay({
@@ -125,8 +141,28 @@ const multerLocal = multer({
   },
 });
 
-app.post('/api/chatbot/upload', multerLocal.single('file'), (req, res) => {
+const chatbotUpload = [
+  multerLocal.any(),
+  (req, res, next) => {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+    if (req.files.length > 1) {
+      return res.status(400).json({ success: false, message: 'Upload only one file' });
+    }
+    req.file = req.files[0];
+    next();
+  },
+];
+
+app.post('/api/chatbot/upload', chatbotUpload, async (req, res) => {
   try {
+    await queue.add('file-ready', {
+      filename: req.file.originalname,
+      destination: req.file.destination,
+      path: req.file.path,
+    });
+
     res.json({
       success: true,
       message: 'File uploaded successfully',
@@ -134,6 +170,62 @@ app.post('/api/chatbot/upload', multerLocal.single('file'), (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Upload failed', error: err });
+  }
+});
+
+app.get('/chat', async (req, res) => {
+  try {
+    const userQuery = req.query.message;
+    if (!userQuery || !String(userQuery).trim()) {
+      return res.status(400).json({ message: 'Query message is required' });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        message: 'OPENAI_API_KEY is missing in backend environment.',
+      });
+    }
+
+    const embeddings = new OpenAIEmbeddings({
+      model: 'text-embedding-3-small',
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+    const vectorStore = await QdrantVectorStore.fromExistingCollection(
+      embeddings,
+      {
+        url: 'http://localhost:6333',
+        collectionName: 'langchainjs-testing',
+      }
+    );
+    const ret = vectorStore.asRetriever({
+      k: 2,
+    });
+    const result = await ret.invoke(String(userQuery));
+
+    const SYSTEM_PROMPT = `
+  You are a helpful AI Assistant who answers the user query based on the available context from PDF file.
+  Context:
+  ${JSON.stringify(result)}
+  `;
+
+    const chatResult = await client.chat.completions.create({
+      model: 'gpt-4.1',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: String(userQuery) },
+      ],
+    });
+
+    return res.json({
+      message: chatResult.choices[0].message.content,
+      docs: result,
+    });
+  } catch (error) {
+    console.error('Chat error:', error);
+    return res.status(500).json({
+      message: 'Failed to process chat request',
+      error: error?.message || 'Unknown error',
+    });
   }
 });
 
