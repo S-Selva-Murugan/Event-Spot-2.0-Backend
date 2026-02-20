@@ -7,12 +7,15 @@ const bookingCltr = require('./app/controllers/booking-cltr');
 const paymentCltr = require('./app/controllers/payment-ctlr');
 const multer = require('multer');
 const cognitoAuth = require('./middlewares/cognitoAuth');
+const authAny = require('./middlewares/authAny');
+const requireAdmin = require('./middlewares/requireAdmin');
 const Razorpay = require('razorpay');
 const { Queue } = require('bullmq');
 const { OpenAIEmbeddings } = require('@langchain/openai');
 const { QdrantVectorStore } = require('@langchain/qdrant');
 const OpenAI = require('openai');
 const path = require('path');
+const fs = require('fs/promises');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const bodyParser = require('body-parser');
 
@@ -67,15 +70,18 @@ app.get('/api/events/:id', eventCltr.getEventById);
 app.get('/api/myEvents', cognitoAuth, eventCltr.getMyEvents);
 
 // -------------------- USER ROUTES --------------------
-app.get('/api/users', userCltr.listAll);
-app.get('/api/users/:id', userCltr.getById);
-app.put('/api/users/:id', userCltr.update);
-app.delete('/api/users/:id', userCltr.remove);
+app.get('/api/users', authAny, requireAdmin, userCltr.listAll);
+app.get('/api/users/:id', authAny, requireAdmin, userCltr.getById);
+app.put('/api/users/:id', authAny, requireAdmin, userCltr.update);
+app.delete('/api/users/:id', authAny, requireAdmin, userCltr.remove);
 app.post('/api/users/login', userCltr.login);
 
 // -------------------- BOOKING ROUTES --------------------
 app.post('/api/bookings', cognitoAuth, bookingCltr.create);
 app.get('/api/bookings', cognitoAuth, bookingCltr.listUserBookings);
+
+// -------------------- ADMIN ROUTES --------------------
+app.put('/api/admin/events/:id/moderation', authAny, requireAdmin, eventCltr.moderateEvent);
 
 // -------------------- PAYMENT ROUTES --------------------
 // Create Razorpay order
@@ -155,7 +161,94 @@ const chatbotUpload = [
   },
 ];
 
-app.post('/api/chatbot/upload', chatbotUpload, async (req, res) => {
+const uploadsDir = path.join(__dirname, 'uploads');
+const getSafePdfPath = (filename) => {
+  const safeName = path.basename(filename || '');
+  if (!safeName || safeName !== filename || !safeName.toLowerCase().endsWith('.pdf')) {
+    return null;
+  }
+  return path.join(uploadsDir, safeName);
+};
+
+app.get('/api/chatbot/files', authAny, requireAdmin, async (req, res) => {
+  try {
+    const entries = await fs.readdir(uploadsDir, { withFileTypes: true });
+    const files = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.pdf'))
+        .map(async (entry) => {
+          const fullPath = path.join(uploadsDir, entry.name);
+          const stat = await fs.stat(fullPath);
+          const splitIndex = entry.name.indexOf('_');
+          const originalName = splitIndex !== -1 ? entry.name.slice(splitIndex + 1) : entry.name;
+          return {
+            filename: entry.name,
+            originalName,
+            size: stat.size,
+            uploadedAt: stat.birthtime || stat.mtime,
+          };
+        })
+    );
+
+    files.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+    return res.json({ success: true, files });
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return res.json({ success: true, files: [] });
+    }
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to list uploaded chatbot files',
+      error: err.message,
+    });
+  }
+});
+
+app.get('/api/chatbot/files/:filename/preview', authAny, requireAdmin, async (req, res) => {
+  try {
+    const fullPath = getSafePdfPath(req.params.filename);
+    if (!fullPath) {
+      return res.status(400).json({ success: false, message: 'Invalid PDF filename' });
+    }
+
+    await fs.access(fullPath);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${path.basename(fullPath)}"`);
+    return res.sendFile(fullPath);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ success: false, message: 'PDF file not found' });
+    }
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to preview PDF file',
+      error: err.message,
+    });
+  }
+});
+
+app.delete('/api/chatbot/files/:filename', authAny, requireAdmin, async (req, res) => {
+  try {
+    const fullPath = getSafePdfPath(req.params.filename);
+    if (!fullPath) {
+      return res.status(400).json({ success: false, message: 'Invalid PDF filename' });
+    }
+
+    await fs.unlink(fullPath);
+    return res.json({ success: true, message: 'PDF deleted successfully' });
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ success: false, message: 'PDF file not found' });
+    }
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete PDF file',
+      error: err.message,
+    });
+  }
+});
+
+app.post('/api/chatbot/upload', authAny, requireAdmin, chatbotUpload, async (req, res) => {
   try {
     await queue.add('file-ready', {
       filename: req.file.originalname,
@@ -227,6 +320,14 @@ app.get('/chat', async (req, res) => {
       error: error?.message || 'Unknown error',
     });
   }
+});
+
+// Return JSON for unknown routes so frontend never receives HTML by default.
+app.use((req, res) => {
+  return res.status(404).json({
+    success: false,
+    message: `Cannot ${req.method} ${req.path}`,
+  });
 });
 
 // -------------------- SERVER --------------------

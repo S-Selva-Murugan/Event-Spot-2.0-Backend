@@ -132,10 +132,13 @@ eventCltr.updateEvent = async (req, res) => {
     // copy incoming body but never allow _id to be overwritten
     const updateData = { ...req.body };
     delete updateData._id; // ensure _id can't be changed
-
-        if (updateData.isApproved === "null") {
-      updateData.isApproved = null;
-      updateData.suggestion = "";
+    delete updateData.suggestion;
+    if (Object.prototype.hasOwnProperty.call(updateData, "isApproved")) {
+      if (String(updateData.isApproved) === "null") {
+        updateData.isApproved = null;
+      } else {
+        delete updateData.isApproved;
+      }
     }
 
     // If photos are uploaded you might handle them earlier (file parsing)
@@ -151,11 +154,43 @@ eventCltr.updateEvent = async (req, res) => {
       return res.status(404).json({ error: "Event not found" });
     }
 
-if (updateData.isApproved === true && updatedEvent.contactEmail) {
-  try {
-    const subject = `Your event "${updatedEvent.eventName}" is approved 🎉`;
+    res.json({
+      message: "Event updated successfully",
+      event: updatedEvent,
+    });
+  } catch (err) {
+    console.error("Update error:", err);
+    res.status(400).json({ error: "Failed to update event", details: err });
+  }
+};
 
-    const text = `
+eventCltr.moderateEvent = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { isApproved, suggestion = "" } = req.body;
+    if (typeof isApproved !== "boolean") {
+      return res.status(400).json({ error: "isApproved must be a boolean" });
+    }
+
+    const updateData = {
+      isApproved,
+      suggestion: isApproved ? "" : suggestion,
+    };
+
+    const updatedEvent = await Event.findByIdAndUpdate(id, updateData, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!updatedEvent) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    if (isApproved === true && updatedEvent.contactEmail) {
+      try {
+        const subject = `Your event "${updatedEvent.eventName}" is approved 🎉`;
+        const text = `
 🎉 Your event "${updatedEvent.eventName}" has been approved and is now live on EventSpot.
 
 Event details:
@@ -164,32 +199,28 @@ Location: ${updatedEvent.location}
 
 Thanks,
 EventSpot Team
-    `;
+        `;
+        const html = `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <p>🎉 <strong>Your event "${updatedEvent.eventName}" has been approved and is now live on EventSpot.</strong></p>
+            <p><strong>Event details:</strong><br/>
+              Date: ${new Date(updatedEvent.date).toLocaleString()}<br/>
+              Location: ${updatedEvent.location}
+            </p>
+            <p>Thanks,<br/><strong>EventSpot Team</strong></p>
+          </div>
+        `;
+        await sendMail({ to: updatedEvent.contactEmail, subject, text, html });
+        console.log(`✅ Approval email sent to ${updatedEvent.contactEmail}`);
+      } catch (mailErr) {
+        console.error("Failed to send approval email:", mailErr);
+      }
+    }
 
-    const html = `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <p>🎉 <strong>Your event "${updatedEvent.eventName}" has been approved and is now live on EventSpot.</strong></p>
-        <p><strong>Event details:</strong><br/>
-          Date: ${new Date(updatedEvent.date).toLocaleString()}<br/>
-          Location: ${updatedEvent.location}
-        </p>
-        <p>Thanks,<br/><strong>EventSpot Team</strong></p>
-      </div>
-    `;
-
-    await sendMail({ to: updatedEvent.contactEmail, subject, text, html });
-    console.log(`✅ Approval email sent to ${updatedEvent.contactEmail}`);
-  } catch (mailErr) {
-    console.error("Failed to send approval email:", mailErr);
-  }
-}
-
-// Send email if event is disapproved
-if (updateData.isApproved === false && updatedEvent.contactEmail) {
-  try {
-    const subject = `Your event "${updatedEvent.eventName}" was not approved ❌`;
-
-    const text = `
+    if (isApproved === false && updatedEvent.contactEmail) {
+      try {
+        const subject = `Your event "${updatedEvent.eventName}" was not approved ❌`;
+        const text = `
 We regret to inform you that your event "${updatedEvent.eventName}" was not approved.
 
 Reason:
@@ -199,31 +230,29 @@ You can update your event and resubmit it for approval.
 
 Thanks,
 EventSpot Team
-    `;
+        `;
+        const html = `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <p>❌ <strong>Your event "${updatedEvent.eventName}" was not approved.</strong></p>
+            <p><strong>Reason:</strong> ${updateData.suggestion || "No specific reason provided."}</p>
+            <p>You can update your event and resubmit it for approval.</p>
+            <p>Thanks,<br/><strong>EventSpot Team</strong></p>
+          </div>
+        `;
+        await sendMail({ to: updatedEvent.contactEmail, subject, text, html });
+        console.log(`📩 Disapproval email sent to ${updatedEvent.contactEmail}`);
+      } catch (mailErr) {
+        console.error("Failed to send disapproval email:", mailErr);
+      }
+    }
 
-    const html = `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <p>❌ <strong>Your event "${updatedEvent.eventName}" was not approved.</strong></p>
-        <p><strong>Reason:</strong> ${updateData.suggestion || "No specific reason provided."}</p>
-        <p>You can update your event and resubmit it for approval.</p>
-        <p>Thanks,<br/><strong>EventSpot Team</strong></p>
-      </div>
-    `;
-
-    await sendMail({ to: updatedEvent.contactEmail, subject, text, html });
-    console.log(`📩 Disapproval email sent to ${updatedEvent.contactEmail}`);
-  } catch (mailErr) {
-    console.error("Failed to send disapproval email:", mailErr);
-  }
-}
-
-    res.json({
-      message: "Event updated successfully",
+    return res.json({
+      message: "Event moderation updated successfully",
       event: updatedEvent,
     });
   } catch (err) {
-    console.error("Update error:", err);
-    res.status(400).json({ error: "Failed to update event", details: err });
+    console.error("Moderation error:", err);
+    return res.status(400).json({ error: "Failed to moderate event", details: err });
   }
 };
 
