@@ -1,17 +1,84 @@
 const User = require("../models/user-model");
+const { OAuth2Client } = require("google-auth-library");
+const { CognitoJwtVerifier } = require("aws-jwt-verify");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const cognitoVerifier = CognitoJwtVerifier.create({
+  userPoolId: process.env.COGNITO_USER_POOL_ID,
+  tokenUse: "id",
+  clientId: process.env.COGNITO_APP_CLIENT_ID,
+});
 
 const userCltr = {};
+
+const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+
+const verifyIdentityFromProvider = async ({ provider, idToken }) => {
+  if (!provider || !idToken) {
+    return { error: "provider and idToken are required" };
+  }
+
+  if (provider === "google") {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const email = normalizeEmail(payload?.email);
+
+    if (!email) return { error: "Google token does not contain email" };
+    if (payload?.email_verified === false) {
+      return { error: "Google email is not verified" };
+    }
+
+    return {
+      email,
+      name: payload?.name || "",
+      image: payload?.picture || "",
+      cognitoId: null,
+    };
+  }
+
+  if (provider === "cognito") {
+    const payload = await cognitoVerifier.verify(idToken);
+    const email = normalizeEmail(payload?.email);
+
+    if (!email) return { error: "Cognito token does not contain email" };
+
+    return {
+      email,
+      name: payload?.name || "",
+      image: "",
+      cognitoId: payload?.sub || null,
+    };
+  }
+
+  return { error: "Unsupported provider" };
+};
 
 // 🔹 Login or auto-register (Google/Manual)
 userCltr.login = async (req, res) => {
   try {
-    const { email, name, image } = req.body;
+    const { provider, idToken, name: requestName, image: requestImage } = req.body;
+    const verifiedIdentity = await verifyIdentityFromProvider({ provider, idToken });
+
+    if (verifiedIdentity.error) {
+      return res.status(400).json({
+        success: false,
+        message: verifiedIdentity.error,
+      });
+    }
+
+    const email = verifiedIdentity.email;
+    const name = requestName || verifiedIdentity.name || "";
+    const image = requestImage || verifiedIdentity.image || "";
+    const cognitoId = verifiedIdentity.cognitoId;
 
     // Validate email is provided
     if (!email) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Email is required" 
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
       });
     }
 
@@ -24,18 +91,37 @@ userCltr.login = async (req, res) => {
         name: name || "",
         email,
         image: image || "",
+        cognitoId: cognitoId || undefined,
         role: "customer",
       });
       await user.save();
     } else {
+      let requiresSave = false;
+
+      if (provider === "cognito") {
+        if (cognitoId && user.cognitoId && user.cognitoId !== cognitoId) {
+          return res.status(409).json({
+            success: false,
+            message: "Email is already linked to a different Cognito account",
+          });
+        }
+        if (cognitoId && !user.cognitoId) {
+          user.cognitoId = cognitoId;
+          requiresSave = true;
+        }
+      }
+
       // Update name and image if provided and user exists
       if (name && name !== user.name) {
         user.name = name;
+        requiresSave = true;
       }
       if (image && image !== user.image) {
         user.image = image;
+        requiresSave = true;
       }
-      if (name || image) {
+
+      if (requiresSave) {
         await user.save();
       }
     }
@@ -77,12 +163,12 @@ userCltr.login = async (req, res) => {
       errorDetails = err.message;
     }
     
-    res.status(500).json({ 
-      success: false, 
-      message: "Login failed", 
+    res.status(500).json({
+      success: false,
+      message: "Login failed",
       error: errorMessage,
       details: errorDetails,
-      errorType: err.name || "Unknown"
+      errorType: err.name || "Unknown",
     });
   }
 };
@@ -91,17 +177,18 @@ userCltr.login = async (req, res) => {
 userCltr.createOrFind = async (req, res) => {
   try {
     const { name, email, image, role } = req.body;
+    const normalizedEmail = normalizeEmail(email);
 
-    if (!email) {
+    if (!normalizedEmail) {
       return res.status(400).json({ error: "Email is required" });
     }
 
-    let user = await User.findOne({ email });
+    let user = await User.findOne({ email: normalizedEmail });
 
     if (!user) {
       user = new User({
         name,
-        email,
+        email: normalizedEmail,
         image,
         role: role || "customer",
       });
@@ -130,7 +217,7 @@ userCltr.getById = async (req, res) => {
   try {
     const user =
       id.includes("@")
-        ? await User.findOne({ email: id })
+        ? await User.findOne({ email: normalizeEmail(id) })
         : await User.findById(id);
 
     if (!user) {
