@@ -8,7 +8,7 @@ const eventCltr = {};
 // ✅ Get all events
 eventCltr.listAll = async (req, res) => {
   try {
-    const { isApproved } = req.query;
+    const { isApproved, page, limit } = req.query;
     let filter = {};
 
     if (isApproved === "true") {
@@ -19,8 +19,29 @@ eventCltr.listAll = async (req, res) => {
       filter.isApproved = null;
     }
 
-    const events = await Event.find(filter);
-    res.json(events);
+    const hasPagination = page !== undefined || limit !== undefined;
+
+    if (!hasPagination) {
+      const events = await Event.find(filter);
+      return res.json(events);
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (safePage - 1) * safeLimit;
+
+    const [events, total] = await Promise.all([
+      Event.find(filter).sort({ createdAt: -1 }).skip(skip).limit(safeLimit),
+      Event.countDocuments(filter),
+    ]);
+
+    return res.json({
+      data: events,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    });
   } catch (err) {
     console.error("Fetch events error:", err);
     res.status(500).json({ error: "Failed to fetch events", details: err });

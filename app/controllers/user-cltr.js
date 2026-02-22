@@ -204,8 +204,30 @@ userCltr.createOrFind = async (req, res) => {
 // ✅ Get all users (Admin use)
 userCltr.listAll = async (req, res) => {
   try {
-    const users = await User.find().sort({ createdAt: -1 });
-    res.json(users);
+    const { page, limit } = req.query;
+    const hasPagination = page !== undefined || limit !== undefined;
+
+    if (!hasPagination) {
+      const users = await User.find().sort({ createdAt: -1 });
+      return res.json(users);
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (safePage - 1) * safeLimit;
+
+    const [users, total] = await Promise.all([
+      User.find().sort({ createdAt: -1 }).skip(skip).limit(safeLimit),
+      User.countDocuments(),
+    ]);
+
+    return res.json({
+      data: users,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch users", details: err });
   }
