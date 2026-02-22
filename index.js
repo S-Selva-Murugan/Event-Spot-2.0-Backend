@@ -5,6 +5,7 @@ const eventCltr = require('./app/controllers/event-ctlr');
 const userCltr = require('./app/controllers/user-cltr');
 const bookingCltr = require('./app/controllers/booking-cltr');
 const paymentCltr = require('./app/controllers/payment-ctlr');
+const analyticsCltr = require('./app/controllers/analytics-ctlr');
 const multer = require('multer');
 const cognitoAuth = require('./middlewares/cognitoAuth');
 const authAny = require('./middlewares/authAny');
@@ -82,6 +83,7 @@ app.get('/api/bookings', cognitoAuth, bookingCltr.listUserBookings);
 
 // -------------------- ADMIN ROUTES --------------------
 app.put('/api/admin/events/:id/moderation', authAny, requireAdmin, eventCltr.moderateEvent);
+app.get('/api/admin/analytics', authAny, requireAdmin, analyticsCltr.summary);
 
 // -------------------- PAYMENT ROUTES --------------------
 // Create Razorpay order
