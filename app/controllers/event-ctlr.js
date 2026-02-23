@@ -8,7 +8,17 @@ const eventCltr = {};
 // ✅ Get all events
 eventCltr.listAll = async (req, res) => {
   try {
-    const { isApproved, page, limit } = req.query;
+    const {
+      isApproved,
+      page,
+      limit,
+      q,
+      category,
+      minPrice,
+      maxPrice,
+      startDate,
+      endDate,
+    } = req.query;
     let filter = {};
 
     if (isApproved === "true") {
@@ -17,6 +27,52 @@ eventCltr.listAll = async (req, res) => {
       filter.isApproved = false;
     } else if (isApproved === "null") {
       filter.isApproved = null;
+    }
+
+    const searchableText = String(q || "").trim();
+    if (searchableText) {
+      const regex = new RegExp(searchableText, "i");
+      filter.$or = [
+        { eventName: regex },
+        { eventDescription: regex },
+        { location: regex },
+        { eventOrganizerName: regex },
+      ];
+    }
+
+    const categoryText = String(category || "").trim();
+    if (categoryText) {
+      const categories = categoryText
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (categories.length > 0) {
+        filter.eventType = { $in: categories };
+      }
+    }
+
+    const safeMinPrice = Number(minPrice);
+    const safeMaxPrice = Number(maxPrice);
+    if (Number.isFinite(safeMinPrice) || Number.isFinite(safeMaxPrice)) {
+      filter.ticketPrice = {};
+      if (Number.isFinite(safeMinPrice)) filter.ticketPrice.$gte = safeMinPrice;
+      if (Number.isFinite(safeMaxPrice)) filter.ticketPrice.$lte = safeMaxPrice;
+    }
+
+    if (startDate || endDate) {
+      filter.date = {};
+      if (startDate) {
+        const parsedStart = new Date(startDate);
+        if (!Number.isNaN(parsedStart.getTime())) filter.date.$gte = parsedStart;
+      }
+      if (endDate) {
+        const parsedEnd = new Date(endDate);
+        if (!Number.isNaN(parsedEnd.getTime())) {
+          parsedEnd.setHours(23, 59, 59, 999);
+          filter.date.$lte = parsedEnd;
+        }
+      }
+      if (Object.keys(filter.date).length === 0) delete filter.date;
     }
 
     const hasPagination = page !== undefined || limit !== undefined;
@@ -35,12 +91,23 @@ eventCltr.listAll = async (req, res) => {
       Event.countDocuments(filter),
     ]);
 
+    const categoryBaseFilter = {};
+    if (isApproved === "true") {
+      categoryBaseFilter.isApproved = true;
+    } else if (isApproved === "false") {
+      categoryBaseFilter.isApproved = false;
+    } else if (isApproved === "null") {
+      categoryBaseFilter.isApproved = null;
+    }
+    const availableCategories = await Event.distinct("eventType", categoryBaseFilter);
+
     return res.json({
       data: events,
       total,
       page: safePage,
       limit: safeLimit,
       totalPages: Math.ceil(total / safeLimit),
+      availableCategories: availableCategories.filter(Boolean).sort(),
     });
   } catch (err) {
     console.error("Fetch events error:", err);
