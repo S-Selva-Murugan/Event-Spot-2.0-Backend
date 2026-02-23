@@ -107,8 +107,33 @@ bookingCltr.listUserBookings = async (req, res) => {
       return res.status(401).json({ error: "User not authenticated" });
     }
 
-    const bookings = await Booking.find({ userId }).populate("eventId");
-    res.json(bookings);
+    const { page, limit } = req.query;
+    const hasPagination = page !== undefined || limit !== undefined;
+    const filter = { userId };
+
+    if (!hasPagination) {
+      const bookings = await Booking.find(filter)
+        .populate("eventId")
+        .sort({ createdAt: -1 });
+      return res.json(bookings);
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (safePage - 1) * safeLimit;
+
+    const [bookings, total] = await Promise.all([
+      Booking.find(filter).populate("eventId").sort({ createdAt: -1 }).skip(skip).limit(safeLimit),
+      Booking.countDocuments(filter),
+    ]);
+
+    return res.json({
+      data: bookings,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    });
   } catch (err) {
     console.error("❌ Fetch user bookings error:", err);
     res.status(500).json({ error: "Failed to fetch user bookings" });

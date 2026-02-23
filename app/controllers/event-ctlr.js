@@ -119,8 +119,31 @@ eventCltr.listAll = async (req, res) => {
 eventCltr.getMyEvents = async (req, res) => {
   try {
     const userId = req.user.cognitoId; // ✅ from the verified token
-    const myEvents = await Event.find({ createdBy: userId });
-    res.json(myEvents);
+    const { page, limit } = req.query;
+    const hasPagination = page !== undefined || limit !== undefined;
+    const filter = { createdBy: userId };
+
+    if (!hasPagination) {
+      const myEvents = await Event.find(filter).sort({ createdAt: -1 });
+      return res.json(myEvents);
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (safePage - 1) * safeLimit;
+
+    const [myEvents, total] = await Promise.all([
+      Event.find(filter).sort({ createdAt: -1 }).skip(skip).limit(safeLimit),
+      Event.countDocuments(filter),
+    ]);
+
+    return res.json({
+      data: myEvents,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    });
   } catch (err) {
     console.error("Error fetching user events:", err);
     res.status(500).json({ error: "Failed to fetch events" });
