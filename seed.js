@@ -1,11 +1,15 @@
 const mongoose = require("mongoose");
+const path = require("path");
 const User = require("./app/models/user-model");
-
-const MONGO_URI = "mongodb+srv://selvakvs11_db_user:gW1knHynYqBTANL3@mycluster.jfaj9lg.mongodb.net/?retryWrites=true&w=majority&appName=MyCluster"
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 async function seedUsers() {
   try {
-    await mongoose.connect(MONGO_URI);
+    if (!process.env.MONGO_URI) {
+      throw new Error("MONGO_URI is not configured");
+    }
+
+    await mongoose.connect(process.env.MONGO_URI);
     console.log("✅ Connected to MongoDB");
 
     // Clear existing users (optional)
