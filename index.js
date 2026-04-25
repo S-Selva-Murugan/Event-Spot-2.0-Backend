@@ -11,12 +11,13 @@ const cognitoAuth = require('./middlewares/cognitoAuth');
 const authAny = require('./middlewares/authAny');
 const requireAdmin = require('./middlewares/requireAdmin');
 const Razorpay = require('razorpay');
-const { Queue } = require('bullmq');
 const { OpenAIEmbeddings } = require('@langchain/openai');
-const { QdrantVectorStore } = require('@langchain/qdrant');
 const OpenAI = require('openai');
 const path = require('path');
 const fs = require('fs/promises');
+const { processChatbotFile } = require('./utils/chatbotIngestion');
+const { getQdrantRetriever, isQdrantReachable, QDRANT_URL } = require('./utils/qdrant');
+const { getChatbotQueue } = require('./utils/redisQueue');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const bodyParser = require('body-parser');
 
@@ -32,13 +33,6 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-});
-
-const queue = new Queue('file-upload-queue', {
-  connection: {
-    host: 'localhost',
-    port: '6379',
-  },
 });
 
 // ✅ Initialize Razorpay (test mode)
@@ -252,19 +246,40 @@ app.delete('/api/chatbot/files/:filename', authAny, requireAdmin, async (req, re
 
 app.post('/api/chatbot/upload', authAny, requireAdmin, chatbotUpload, async (req, res) => {
   try {
-    await queue.add('file-ready', {
+    const jobData = {
       filename: req.file.originalname,
       destination: req.file.destination,
       path: req.file.path,
-    });
+    };
 
-    res.json({
+    const queue = await getChatbotQueue();
+
+    if (queue) {
+      await queue.add('file-ready', jobData);
+
+      return res.json({
+        success: true,
+        message: 'File uploaded successfully and queued for processing',
+        processingMode: 'queue',
+        file: req.file,
+      });
+    }
+
+    const result = await processChatbotFile(jobData);
+
+    return res.json({
       success: true,
-      message: 'File uploaded successfully',
+      message: 'File uploaded successfully and processed inline',
+      processingMode: 'inline',
+      result,
       file: req.file,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Upload failed', error: err });
+    return res.status(500).json({
+      success: false,
+      message: 'Upload failed',
+      error: err.message,
+    });
   }
 });
 
@@ -281,39 +296,55 @@ app.get('/chat', async (req, res) => {
       });
     }
 
-    const embeddings = new OpenAIEmbeddings({
-      model: 'text-embedding-3-small',
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-    const vectorStore = await QdrantVectorStore.fromExistingCollection(
-      embeddings,
-      {
-        url: 'http://localhost:6333',
-        collectionName: 'langchainjs-testing',
-      }
-    );
-    const ret = vectorStore.asRetriever({
-      k: 2,
-    });
-    const result = await ret.invoke(String(userQuery));
+    const trimmedQuery = String(userQuery).trim();
+    const qdrantReachable = await isQdrantReachable();
+    let docs = [];
 
-    const SYSTEM_PROMPT = `
-  You are a helpful AI Assistant who answers the user query based on the available context from PDF file.
-  Context:
-  ${JSON.stringify(result)}
-  `;
+    if (qdrantReachable) {
+      try {
+        const embeddings = new OpenAIEmbeddings({
+          model: 'text-embedding-3-small',
+          apiKey: process.env.OPENAI_API_KEY,
+        });
+        const retriever = await getQdrantRetriever(embeddings, { k: 2 });
+        docs = await retriever.invoke(trimmedQuery);
+      } catch (retrievalError) {
+        console.error('Chat retrieval warning:', retrievalError.message);
+      }
+    } else {
+      console.warn(`Qdrant is not reachable at ${QDRANT_URL}. Chat will answer without PDF context.`);
+    }
+
+    const systemLines = [
+      'You are Namitha, the EventSpot assistant.',
+      'Help users with events, bookings, tickets, dashboard usage, and organizer workflows.',
+      'Be concise, practical, and friendly.',
+    ];
+
+    if (docs.length > 0) {
+      systemLines.push(
+        'Use the uploaded PDF context below when it is relevant. If the context does not answer the question, say that clearly and then help with the best general guidance you can provide.',
+        `Context: ${JSON.stringify(docs)}`
+      );
+    } else {
+      systemLines.push(
+        'The PDF knowledge base is currently unavailable or empty, so answer from general EventSpot product knowledge only.',
+        'If the user asks about specific PDF content, mention that the document knowledge base is not available right now.'
+      );
+    }
 
     const chatResult = await client.chat.completions.create({
       model: 'gpt-4.1',
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: String(userQuery) },
+        { role: 'system', content: systemLines.join('\n\n') },
+        { role: 'user', content: trimmedQuery },
       ],
     });
 
     return res.json({
       message: chatResult.choices[0].message.content,
-      docs: result,
+      docs,
+      knowledgeBaseStatus: docs.length > 0 ? 'connected' : (qdrantReachable ? 'empty' : 'unavailable'),
     });
   } catch (error) {
     console.error('Chat error:', error);
