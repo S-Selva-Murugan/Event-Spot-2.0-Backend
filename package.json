@@ -7,8 +7,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
+    "start:worker": "node worker.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev:worker": "node --watch worker.js"
+    "dev:worker": "node --watch worker.js",
+    "seed": "node seed.js"
   },
   "keywords": [],
   "author": "",

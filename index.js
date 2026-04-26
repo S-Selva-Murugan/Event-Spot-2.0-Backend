@@ -14,15 +14,20 @@ const Razorpay = require('razorpay');
 const { OpenAIEmbeddings } = require('@langchain/openai');
 const OpenAI = require('openai');
 const path = require('path');
-const fs = require('fs/promises');
 const { processChatbotFile } = require('./utils/chatbotIngestion');
+const {
+  deleteChatbotFileFromS3,
+  getChatbotFileFromS3,
+  listChatbotFilesFromS3,
+  uploadChatbotFileToS3,
+} = require('./utils/chatbotStorage');
 const { getQdrantRetriever, isQdrantReachable, QDRANT_URL } = require('./utils/qdrant');
 const { getChatbotQueue } = require('./utils/redisQueue');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const bodyParser = require('body-parser');
 
 const app = express();
-const PORT = 3001;
+const PORT = Number(process.env.PORT || 3001);
 
 configureDB();
 app.use(cors());
@@ -128,14 +133,7 @@ app.post('/api/payment/webhook', express.json({ verify: (req, res, buf) => {
 
 // -------------------- CHATBOT UPLOAD --------------------
 const multerLocal = multer({
-  storage: multer.diskStorage({
-    destination: function (req, file, cb) {
-      cb(null, 'uploads/');
-    },
-    filename: function (req, file, cb) {
-      cb(null, Date.now() + '_' + file.originalname);
-    },
-  }),
+  storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
     const allowed = ['application/pdf', 'text/plain'];
     if (allowed.includes(file.mimetype)) cb(null, true);
@@ -157,41 +155,11 @@ const chatbotUpload = [
   },
 ];
 
-const uploadsDir = path.join(__dirname, 'uploads');
-const getSafePdfPath = (filename) => {
-  const safeName = path.basename(filename || '');
-  if (!safeName || safeName !== filename || !safeName.toLowerCase().endsWith('.pdf')) {
-    return null;
-  }
-  return path.join(uploadsDir, safeName);
-};
-
 app.get('/api/chatbot/files', authAny, requireAdmin, async (req, res) => {
   try {
-    const entries = await fs.readdir(uploadsDir, { withFileTypes: true });
-    const files = await Promise.all(
-      entries
-        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.pdf'))
-        .map(async (entry) => {
-          const fullPath = path.join(uploadsDir, entry.name);
-          const stat = await fs.stat(fullPath);
-          const splitIndex = entry.name.indexOf('_');
-          const originalName = splitIndex !== -1 ? entry.name.slice(splitIndex + 1) : entry.name;
-          return {
-            filename: entry.name,
-            originalName,
-            size: stat.size,
-            uploadedAt: stat.birthtime || stat.mtime,
-          };
-        })
-    );
-
-    files.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+    const files = await listChatbotFilesFromS3();
     return res.json({ success: true, files });
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      return res.json({ success: true, files: [] });
-    }
     return res.status(500).json({
       success: false,
       message: 'Failed to list uploaded chatbot files',
@@ -202,22 +170,17 @@ app.get('/api/chatbot/files', authAny, requireAdmin, async (req, res) => {
 
 app.get('/api/chatbot/files/:filename/preview', authAny, requireAdmin, async (req, res) => {
   try {
-    const fullPath = getSafePdfPath(req.params.filename);
-    if (!fullPath) {
-      return res.status(400).json({ success: false, message: 'Invalid PDF filename' });
-    }
-
-    await fs.access(fullPath);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${path.basename(fullPath)}"`);
-    return res.sendFile(fullPath);
+    const file = await getChatbotFileFromS3(req.params.filename);
+    res.setHeader('Content-Type', file.contentType);
+    res.setHeader('Content-Length', String(file.contentLength));
+    res.setHeader('Content-Disposition', `inline; filename="${file.originalName}"`);
+    return res.send(file.buffer);
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      return res.status(404).json({ success: false, message: 'PDF file not found' });
-    }
-    return res.status(500).json({
+    const message = err.name === 'NoSuchKey' ? 'Uploaded file not found' : 'Failed to preview uploaded file';
+    const statusCode = err.name === 'NoSuchKey' ? 404 : 500;
+    return res.status(statusCode).json({
       success: false,
-      message: 'Failed to preview PDF file',
+      message,
       error: err.message,
     });
   }
@@ -225,20 +188,14 @@ app.get('/api/chatbot/files/:filename/preview', authAny, requireAdmin, async (re
 
 app.delete('/api/chatbot/files/:filename', authAny, requireAdmin, async (req, res) => {
   try {
-    const fullPath = getSafePdfPath(req.params.filename);
-    if (!fullPath) {
-      return res.status(400).json({ success: false, message: 'Invalid PDF filename' });
-    }
-
-    await fs.unlink(fullPath);
-    return res.json({ success: true, message: 'PDF deleted successfully' });
+    await deleteChatbotFileFromS3(req.params.filename);
+    return res.json({ success: true, message: 'Uploaded file deleted successfully' });
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      return res.status(404).json({ success: false, message: 'PDF file not found' });
-    }
-    return res.status(500).json({
+    const message = err.name === 'NoSuchKey' ? 'Uploaded file not found' : 'Failed to delete uploaded file';
+    const statusCode = err.name === 'NoSuchKey' ? 404 : 500;
+    return res.status(statusCode).json({
       success: false,
-      message: 'Failed to delete PDF file',
+      message,
       error: err.message,
     });
   }
@@ -246,10 +203,12 @@ app.delete('/api/chatbot/files/:filename', authAny, requireAdmin, async (req, re
 
 app.post('/api/chatbot/upload', authAny, requireAdmin, chatbotUpload, async (req, res) => {
   try {
+    const uploadedFile = await uploadChatbotFileToS3(req.file);
     const jobData = {
-      filename: req.file.originalname,
-      destination: req.file.destination,
-      path: req.file.path,
+      storageKey: uploadedFile.storageKey,
+      filename: uploadedFile.filename,
+      originalName: uploadedFile.originalName,
+      mimeType: uploadedFile.mimeType,
     };
 
     const queue = await getChatbotQueue();
@@ -261,7 +220,12 @@ app.post('/api/chatbot/upload', authAny, requireAdmin, chatbotUpload, async (req
         success: true,
         message: 'File uploaded successfully and queued for processing',
         processingMode: 'queue',
-        file: req.file,
+        file: {
+          filename: uploadedFile.filename,
+          originalname: uploadedFile.originalName,
+          mimetype: uploadedFile.mimeType,
+          size: uploadedFile.size,
+        },
       });
     }
 
@@ -272,7 +236,12 @@ app.post('/api/chatbot/upload', authAny, requireAdmin, chatbotUpload, async (req
       message: 'File uploaded successfully and processed inline',
       processingMode: 'inline',
       result,
-      file: req.file,
+      file: {
+        filename: uploadedFile.filename,
+        originalname: uploadedFile.originalName,
+        mimetype: uploadedFile.mimeType,
+        size: uploadedFile.size,
+      },
     });
   } catch (err) {
     return res.status(500).json({
@@ -281,6 +250,13 @@ app.post('/api/chatbot/upload', authAny, requireAdmin, chatbotUpload, async (req
       error: err.message,
     });
   }
+});
+
+app.get('/health', (req, res) => {
+  return res.json({
+    success: true,
+    status: 'ok',
+  });
 });
 
 app.get('/chat', async (req, res) => {
