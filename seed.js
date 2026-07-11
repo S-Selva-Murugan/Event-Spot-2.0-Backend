@@ -19,7 +19,7 @@ async function seedUsers() {
     // Create users
     const users = [
       {
-        name: "Namitha",
+        name: "Chitti",
         email: "namithayohannan1802@.com",
         // image: "https://i.pravatar.cc/150?img=1",
         role: "customer",

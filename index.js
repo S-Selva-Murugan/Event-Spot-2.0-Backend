@@ -292,7 +292,7 @@ app.get('/chat', async (req, res) => {
     }
 
     const systemLines = [
-      'You are Namitha, the EventSpot assistant.',
+      'You are Chitti, the EventSpot assistant.',
       'Help users with events, bookings, tickets, dashboard usage, and organizer workflows.',
       'Be concise, practical, and friendly.',
     ];
